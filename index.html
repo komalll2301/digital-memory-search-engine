@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Digital Memory Search Engine</title>
+<style>
+:root{--bg:#f6f6f3;--card:#fff;--tx:#1b1b1f;--mu:#6b6b76;--ac:#4f46e5;--bd:#e2e2dc;--ok:#15803d;--bad:#b91c1c;--hl:#fde68a}
+@media(prefers-color-scheme:dark){:root{--bg:#15151a;--card:#1f1f26;--tx:#ececf1;--mu:#9a9aa8;--ac:#818cf8;--bd:#33333d;--ok:#4ade80;--bad:#f87171;--hl:#5b4a0a}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx);line-height:1.5}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 60px}
+h1{font-size:1.6rem;margin:0 0 4px}
+.sub{color:var(--mu);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,.btn{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:.95rem;cursor:pointer}
+button.sec,.btn.sec{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+input[type=text]{flex:1;min-width:200px;padding:11px 12px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:1rem}
+input[type=file]{display:none}
+.drop{border:2px dashed var(--bd);border-radius:10px;padding:18px;text-align:center;color:var(--mu)}
+.drop.on{border-color:var(--ac);color:var(--ac)}
+.small{font-size:.85rem;color:var(--mu)}
+.res{border-left:3px solid var(--ac)}
+.meta{font-size:.8rem;color:var(--mu);margin-bottom:6px}
+mark{background:var(--hl);color:inherit;padding:0 2px;border-radius:3px}
+.ans{font-weight:600;margin-bottom:10px}
+.warn{border-left:3px solid var(--bad)}
+.good{color:var(--ok)}
+.flow{display:flex;gap:6px;flex-wrap:wrap;font-size:.85rem}
+.flow span{background:var(--bg);border:1px solid var(--bd);border-radius:6px;padding:4px 8px}
+ul{margin:6px 0;padding-left:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Digital Memory Search Engine</h1>
+<p class="sub">Search your own files in natural language. Everything runs in your browser; nothing is uploaded anywhere.</p>
+
+<div class="card">
+  <div id="drop" class="drop">Drag &amp; drop files here (TXT, MD, CSV, PDF, DOCX, PNG/JPG)</div>
+  <div class="row" style="margin-top:10px">
+    <label class="btn" for="f1">Choose files</label>
+    <label class="btn sec" for="f2">Choose folder</label>
+    <button class="sec" id="demo">Load demo data</button>
+    <button class="sec" id="clear">Revoke all &amp; clear index</button>
+  </div>
+  <input id="f1" type="file" multiple>
+  <input id="f2" type="file" webkitdirectory multiple>
+  <p class="small" id="status">Index is empty. Add files or load demo data.</p>
+  <div id="files" class="small"></div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <input type="text" id="q" placeholder="e.g. When is the field project external?">
+    <button id="go">Search</button>
+  </div>
+</div>
+
+<div id="out"></div>
+
+<div class="card">
+  <b>How it works</b>
+  <div class="flow" style="margin-top:8px">
+    <span>1. Select files</span>→<span>2. Extract text (parsers / OCR)</span>→<span>3. Split into chunks</span>→<span>4. BM25 index</span>→<span>5. Rank + threshold</span>→<span>6. Answer with source evidence</span>
+  </div>
+  <ul class="small">
+    <li>Credentials (passwords, OTP, PIN, tokens) are never indexed and such queries are refused.</li>
+    <li>If no chunk matches enough of the query, the system says so instead of guessing (no-evidence response).</li>
+    <li>Only files you explicitly select are indexed; "Revoke" deletes the index from memory.</li>
+  </ul>
+</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const STOP=new Set("a an the is are was were be been to of in on at for and or my me i it its this that with from by as do did does what when where who whom how tell about please give show find".split(" "));
+const SENS=/\b(passwords?|passcode|passwd|otp|cvv|pin|api key|secret key|token|credentials?)\b/i;
+const SENS_LINE=/(password|passcode|passwd|otp|cvv|api[_ ]?key|secret)\s*[:=]/i;
+const docs=[];let chunks=[],df={},avgLen=1;
+
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const tok=s=>(s.toLowerCase().match(/[a-z0-9\u0900-\u097f]+/g)||[]).filter(w=>!STOP.has(w)&&w.length>1);
+
+function makeChunks(text,loc){
+  text=text.replace(/\s+/g,' ').trim();
+  const out=[];
+  for(let i=0;i<text.length;i+=500){
+    const t=text.slice(i,i+600);
+    if(SENS_LINE.test(t)) continue;              // credentials are excluded from indexing
+    out.push({text:t,loc:loc+(text.length>600?' · part '+(i/500+1):'')});
+    if(i+600>=text.length)break;
+  }
+  return out;
+}
+
+async function loadScript(src){
+  return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=rej;document.head.appendChild(s)});
+}
+
+async function extract(f){
+  const ext=f.name.split('.').pop().toLowerCase();
+  if(['txt','md','csv','json','log','html','xml'].includes(ext)) return [{t:await f.text(),loc:'text'}];
+  if(ext==='pdf'){
+    pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;
+    const pages=[];
+    for(let p=1;p<=pdf.numPages;p++){
+      const c=await (await pdf.getPage(p)).getTextContent();
+      pages.push({t:c.items.map(i=>i.str).join(' '),loc:'page '+p});
+    }
+    return pages;
+  }
+  if(ext==='docx'){
+    const r=await mammoth.extractRawText({arrayBuffer:await f.arrayBuffer()});
+    return [{t:r.value,loc:'document'}];
+  }
+  if(['png','jpg','jpeg','webp'].includes(ext)){
+    if(!window.Tesseract) await loadScript('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.5/tesseract.min.js');
+    const {data}=await Tesseract.recognize(f,'eng');
+    return [{t:data.text,loc:'OCR text'}];
+  }
+  return null;
+}
+
+function rebuild(){
+  chunks=[];df={};
+  docs.forEach(d=>d.chunks.forEach(c=>{
+    c.tf={};tok(c.text).forEach(w=>c.tf[w]=(c.tf[w]||0)+1);
+    c.len=Object.values(c.tf).reduce((a,b)=>a+b,0)||1;
+    c.doc=d;chunks.push(c);
+    Object.keys(c.tf).forEach(w=>df[w]=(df[w]||0)+1);
+  }));
+  avgLen=chunks.reduce((a,c)=>a+c.len,0)/(chunks.length||1);
+  $('status').textContent=docs.length?`${docs.length} file(s) indexed · ${chunks.length} searchable chunks`:'Index is empty. Add files or load demo data.';
+  $('files').innerHTML=docs.map(d=>'• '+esc(d.name)+' <span class="small">('+d.chunks.length+' chunks)</span>').join('<br>');
+}
+
+async function addFiles(list){
+  const skipped=[];
+  for(const f of list){
+    if(docs.some(d=>d.name===f.name&&d.size===f.size)) continue;
+    $('status').textContent='Reading '+f.name+' ...';
+    try{
+      const parts=await extract(f);
+      if(!parts){skipped.push(f.name+' (unsupported)');continue}
+      const ch=parts.flatMap(p=>makeChunks(p.t,p.loc));
+      if(!ch.length){skipped.push(f.name+' (no readable text)');continue}
+      docs.push({name:f.name,size:f.size,type:f.name.split('.').pop().toUpperCase(),file:f,chunks:ch});
+    }catch(e){skipped.push(f.name+' (error: '+e.message+')')}
+  }
+  rebuild();
+  if(skipped.length)$('status').textContent+=' · Skipped: '+skipped.join(', ');
+}
+
+const DEMO={
+ 'college_timetable.txt':'Sanjay Ghodawat University, B.Tech AI and Data Science, second year. Monday: Data Structures 9 AM, Machine Learning 11 AM. Tuesday: Database Systems 10 AM. Field Project externals are on 19 November 2026 in Signature Space, Kolhapur. Bring the report, the deployed link and the GitHub repository link.',
+ 'ml_notes.txt':'BM25 is a ranking function used in information retrieval. It scores a document using term frequency, inverse document frequency and document length. Retrieval-Augmented Generation (RAG) retrieves evidence first and then generates an answer grounded in that evidence. Semantic search uses embeddings to find related meaning even when the words differ.',
+ 'goa_trip_plan.txt':'Goa trip plan: leave Kolhapur on Friday morning by bus, reach Panaji by evening. Hotel booked near Calangute beach for 3 nights. Budget is 8000 rupees per person. Visit Fort Aguada on Saturday and Dudhsagar waterfalls on Sunday.',
+ 'electricity_bill.txt':'Electricity bill for October 2026. Units consumed: 142. Amount due: 1,180 rupees. Due date: 25 November 2026. Consumer number is printed on the top right of the bill.',
+ 'wifi_notes.txt':'Home router notes. WiFi password: hunter2-demo. Router model TP-Link. Admin page is at 192.168.0.1. ISP support number saved in phone.'
+};
+function loadDemo(){
+  Object.entries(DEMO).forEach(([n,t])=>{
+    if(docs.some(d=>d.name===n))return;
+    const file=new File([t],n,{type:'text/plain'});
+    const ch=makeChunks(t,'text');
+    docs.push({name:n,size:t.length,type:'TXT',file,chunks:ch,demo:true});
+  });
+  rebuild();
+}
+
+function search(q){
+  const qt=[...new Set(tok(q))],N=chunks.length;
+  if(!qt.length)return [];
+  const r=chunks.map(c=>{
+    let s=0,hit=0;
+    qt.forEach(w=>{
+      const f=c.tf[w]||0;if(!f)return;hit++;
+      const idf=Math.log(1+(N-df[w]+.5)/(df[w]+.5));
+      s+=idf*f*2.5/(f+1.5*(.25+.75*c.len/avgLen));
+    });
+    return {c,s,hit,total:qt.length};
+  }).filter(x=>x.s>0&&x.hit/x.total>=0.5).sort((a,b)=>b.s-a.s);
+  const per={},top=[];
+  for(const x of r){per[x.c.doc.name]=(per[x.c.doc.name]||0)+1;if(per[x.c.doc.name]<=2)top.push(x);if(top.length>=5)break}
+  return top.map(x=>({...x,qt}));
+}
+
+function snippet(text,qt){
+  const lower=text.toLowerCase();
+  let pos=-1;for(const w of qt){const i=lower.indexOf(w);if(i>=0&&(pos<0||i<pos))pos=i}
+  const start=Math.max(0,pos-80),end=Math.min(text.length,start+260);
+  let s=esc(text.slice(start,end));
+  qt.forEach(w=>{s=s.replace(new RegExp('('+w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','ig'),'<mark>$1</mark>')});
+  return (start>0?'… ':'')+s+(end<text.length?' …':'');
+}
+
+function openOriginal(name){
+  const d=docs.find(x=>x.name===name);if(!d)return alert('File not found. It may have been revoked.');
+  const url=URL.createObjectURL(d.file);
+  window.open(url,'_blank');
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+
+function run(){
+  const q=$('q').value.trim(),out=$('out');
+  if(!q)return;
+  if(SENS.test(q)){
+    out.innerHTML='<div class="card warn"><b>Request blocked for privacy.</b><br>Passwords, PINs, OTPs, tokens and other credentials are excluded from indexing and cannot be searched.</div>';return;
+  }
+  if(!chunks.length){out.innerHTML='<div class="card warn">The index is empty. Add files or load demo data first.</div>';return}
+  const t0=performance.now(),res=search(q),ms=(performance.now()-t0).toFixed(1);
+  if(!res.length){
+    out.innerHTML='<div class="card warn"><b>No matching information was found in your indexed and authorized sources.</b><div class="small">Searched '+chunks.length+' chunks in '+ms+' ms. Nothing is guessed when evidence is missing.</div></div>';return;
+  }
+  let h='<div class="card"><div class="ans">Best match: '+snippet(res[0].c.text,res[0].qt)+'</div><div class="small">Source: '+esc(res[0].c.doc.name)+' · '+esc(res[0].c.loc)+'</div></div>';
+  h+='<div class="small" style="margin:0 0 8px">'+res.length+' evidence result(s) · '+ms+' ms</div>';
+  res.forEach((x,i)=>{
+    h+='<div class="card res"><div class="meta">#'+(i+1)+' · '+esc(x.c.doc.name)+' · '+x.c.doc.type+' · '+esc(x.c.loc)+' · BM25 score '+x.s.toFixed(2)+' · matched '+x.hit+' of '+x.total+' query terms</div>'
+      +'<div>'+snippet(x.c.text,x.qt)+'</div>'
+      +'<div class="row" style="margin-top:10px"><button class="sec" data-open="'+esc(x.c.doc.name)+'">Open original file</button></div></div>';
+  });
+  out.innerHTML=h;
+  out.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openOriginal(b.dataset.open));
+}
+
+$('go').onclick=run;
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
+$('f1').onchange=e=>{addFiles([...e.target.files]);e.target.value=''};
+$('f2').onchange=e=>{addFiles([...e.target.files]);e.target.value=''};
+$('demo').onclick=loadDemo;
+$('clear').onclick=()=>{docs.length=0;rebuild();$('out').innerHTML=''};
+const drop=$('drop');
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('on')}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('on')}));
+drop.addEventListener('drop',e=>addFiles([...e.dataTransfer.files]));
+</script>
+</body>
+</html>
